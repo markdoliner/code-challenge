@@ -1,0 +1,241 @@
+#!/usr/bin/env python3
+
+"""
+A command line tool that shows the store closest to a given address.
+
+Control flow is "bottom up."
+
+The program is pretty straightforward:
+* Parses command line arguments.
+* Looks up the latitude and longitude of the address or zip code using the Bing Maps API.
+* Reads the store-locations.csv file.
+* Loops through all the locations in the file to find the closest one.
+* Great-circle distance is used to determine "closeness."
+* Prints the result.
+"""
+
+import argparse
+import csv
+import json
+import math
+import sys
+
+import requests
+
+
+_BING_MAPS_API_URL = 'https://dev.virtualearth.net/REST/v1/Locations'
+_BING_MAPS_API_KEY = 'Avgq_TUfPDHa5kfPorsGz3KI8meXdAmr3h-10PRGzOAJ1qRt6fHiDiIc7NorRAH6'
+_DATA_FILENAME = 'store-locations.csv'
+
+
+def _exit_with_error(want_json_output, message):
+    if want_json_output:
+        # Avoid printing a trailing newline with JSON in case
+        # it makes it easier for another script to consume it.
+        print(json.dumps({'error': message}), file=sys.stderr, end='')
+    else:
+        print('Error: %s' % message, file=sys.stderr)
+
+    sys.exit(1)
+
+
+def _parse_args():
+    """Parse command line arguments.
+
+    Returns:
+        argparse.Namespace: An object holding command line arguments as
+            attributes.
+    """
+    parser = argparse.ArgumentParser(
+        description='Locate the store nearest to an address (as the crow ' +
+        'flies) and print the distance to the store and the store\'s address')
+
+    # Either address or zip must be provided but not both, so use an
+    # option group.
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument(
+        '--address',
+        help='Find nearest store to this address. If there are multiple ' +
+        'best-matches, return the first.')
+    group.add_argument(
+        '--zip',
+        help='Find nearest store to this zip code. If there are multiple ' +
+        'best-matches, return the first.')
+
+    parser.add_argument(
+        '--output',
+        choices=['json', 'text'],
+        default='text',
+        help='Output in human-readable text, or in JSON (e.g. machine-readable) [default: text]')
+    parser.add_argument(
+        '--units',
+        choices=['km', 'mi'],
+        default='mi',
+        help='Display units in miles or kilometers [default: mi]')
+
+    return parser.parse_args()
+
+
+def _look_up_lat_long_for_location(location_query_string):
+    """Geocode an address and return the latitude and longitude.
+
+    Args:
+        location_query_string (str): A free-form address or zip code
+            that will be looked up using a geocoding API.
+    Returns:
+        Tuple[float, float]: A 2-item tuple containing the latitude and
+            longitude. If the latitude and longitude could not be
+            determined for the location_query_string then (None, None)
+            is returned.
+    """
+    # Use the Bing Maps API for geocoding. The API is documented at
+    # https://docs.microsoft.com/en-us/bingmaps/rest-services/locations/find-a-location-by-query
+    r = requests.get(_BING_MAPS_API_URL, {
+        'query': location_query_string,
+        'maxResults': '1',
+        'key': _BING_MAPS_API_KEY,
+    })
+    response = r.json()
+    resource_set = response['resourceSets'][0]
+    if resource_set['estimatedTotal'] <= 0:
+        # No matches.
+        return (None, None)
+    coordinates = resource_set['resources'][0]['point']['coordinates']
+    return (coordinates[0], coordinates[1])
+
+
+def _load_store_locations(args):
+    """Load the store locations data.
+
+    Currently this reads from a CSV file, but it could be modified to
+    load from a database.
+
+    Returns:
+        List[OrderedDict]
+    """
+    try:
+        with open(_DATA_FILENAME, newline='') as f:
+            return [row for row in csv.DictReader(f)]
+    except FileNotFoundError:
+        _exit_with_error(args, 'Data file %s does not exist.' % _DATA_FILENAME)
+
+
+def _haversine_distance(lat1, lon1, lat2, lon2, in_kilometers):
+    """Calculate the great-circle distance between two points on
+    Earth (specified in decimal degrees).
+
+    There are multiple ways to calculate the distance between two points
+    on Earth. Great-circle distance assumes the Earth is a perfect
+    sphere (it's not, but the difference is minor) and calculates the
+    distance across the surface of the sphere.
+
+    And apparently there are multiple great-circle distance formulas?
+    Wikipedia (https://en.wikipedia.org/wiki/Great-circle_distance) and
+    https://www.movable-type.co.uk/scripts/latlong.html discuss this in
+    a little more detail.
+
+    Args:
+        lat1 (float)
+        lon1 (float)
+        lat2 (float)
+        lon2 (float)
+        in_kilometers (bool): True if the return value should be a
+            distance in kilometers. Otherwise False for miles.
+    """
+    # TODO: If this program was going to be used for something
+    # meaningful I'd want to make sure this equation is the best choice
+    # and that the implementation is correct. --Mark Doliner
+
+    # The body of this function is from
+    # https://stackoverflow.com/a/4913653/1634007
+
+    # convert decimal degrees to radians
+    lon1, lat1, lon2, lat2 = map(math.radians, [lon1, lat1, lon2, lat2])
+
+    # haversine formula
+    dlon = lon2 - lon1
+    dlat = lat2 - lat1
+    a = math.sin(dlat/2)**2 + math.cos(lat1) * math.cos(lat2) * math.sin(dlon/2)**2
+    c = 2 * math.asin(math.sqrt(a))
+    # Radius of Earth in the desired units.
+    r = 6371 if in_kilometers else 3959
+    return c * r
+
+
+def _find_nearest_store(store_locations, lat, lon, in_kilometers):
+    """Loop through the list of all stores and return the one that is
+    closest (as the crow flies) to the specified latitude and longitude.
+
+    Returns:
+        OrderedDict
+    """
+    # TODO: This list is large and looping through it isn't super fast.
+    # There are more efficient ways to do this search if performance is
+    # an issue. I don't know what they are, but I know they exist. Maybe
+    # a quadtree or octree.
+    nearest_store = None
+    nearest_store_distance = None
+    for loc in store_locations:
+        lat2 = float(loc['Latitude'])
+        lon2 = float(loc['Longitude'])
+        distance = _haversine_distance(lat, lon, lat2, lon2, in_kilometers)
+        if not nearest_store or distance < nearest_store_distance:
+            nearest_store = loc
+            nearest_store_distance = distance
+    return nearest_store
+
+
+def main():
+    args = _parse_args()
+    want_json_output = (args.output == 'json')
+
+    # Geocode address.
+    (lat, lon) = _look_up_lat_long_for_location(args.address or args.zip)
+    if not lat or not lon:
+        address_or_zip = 'address' if args.address else 'zip code'
+        _exit_with_error(
+            want_json_output,
+            'Could not locate that %s on a map. You may wish to verify that it is correct.'
+            % address_or_zip)
+
+    # Load store locations.
+    store_locations = _load_store_locations(want_json_output)
+    if not store_locations:
+        _exit_with_error(
+            want_json_output, '%s does not contain any store locations.' % _DATA_FILENAME)
+
+    # Find nearest store.
+    in_kilometers = (args.units == 'km')
+    nearest_store = _find_nearest_store(store_locations, lat, lon, in_kilometers)
+    lat2 = float(nearest_store['Latitude'])
+    lon2 = float(nearest_store['Longitude'])
+    distance = _haversine_distance(lat, lon, lat2, lon2, in_kilometers)
+
+    # Display result.
+    if want_json_output:
+        output = nearest_store.copy()
+        output['Distance'] = '%s %s' % (round(distance, 4), args.units)
+        # Avoid printing a trailing newline with JSON in case
+        # it makes it easier for another script to consume it.
+        print(json.dumps(output), end='')
+    else:
+        print('The nearest store to %s is the %s store, located at %s.' % (
+            (args.address or args.zip),
+            nearest_store['Store Name'],
+            nearest_store['Store Location']))
+        print('It\'s %s %s away.' % (round(distance, 1), args.units))
+        print('Address: %s' % (nearest_store['Address']))
+        print('         %s, %s %s' % (
+            nearest_store['City'],
+            nearest_store['State'],
+            nearest_store['Zip Code']))
+
+
+if __name__ == '__main__':
+    try:
+        main()
+    except KeyboardInterrupt:
+        # KeyboardInterrupt is caught in order for the output to be less
+        # ugly when the user interrupts the program.
+        print()
+        sys.exit(1)

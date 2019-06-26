@@ -1,0 +1,5 @@
+# Files in any directory.
+*.pyc
+
+# Specific files.
+/venv/

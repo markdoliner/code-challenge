@@ -1,0 +1,23 @@
+[MESSAGES CONTROL]
+
+disable=
+    duplicate-code,
+    fixme,
+    invalid-name,
+    missing-docstring,
+    too-few-public-methods,
+    too-many-branches,
+    too-many-locals,
+    too-many-return-statements,
+
+[REPORTS]
+
+score=no
+
+
+[TYPECHECK]
+
+# Responses adds some things to its namespace dynamically which
+# confuses pylint. This workaround tells pylint to skip the relevant
+# checks for responses.
+ignored-classes=responses

@@ -1,0 +1,9 @@
+# Two linters.
+pycodestyle
+pylint
+
+# For making https requests to the Bing Maps API for geocoding.
+requests
+
+# For mocking Bing Maps API responses.
+responses
